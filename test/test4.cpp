@@ -1,0 +1,171 @@
+#include <iostream>
+#include <string>
+#include <algorithm>
+#include <cstring>
+#include <cerrno>
+#include <thread>
+#include <mutex>
+#include <unistd.h>
+#include <arpa/inet.h>
+using namespace std;
+mutex cout_mtx;
+
+int CreateServerSocket(int port) {
+    int server_fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (server_fd == -1) {
+        cerr << "socket failed" << endl;
+        return -1;
+    }
+
+    int opt = 1;
+    setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+    struct sockaddr_in server_addr;
+    server_addr.sin_family = AF_INET;
+    server_addr.sin_addr.s_addr = INADDR_ANY;
+    server_addr.sin_port = htons(port);
+
+    if (bind(server_fd, (struct sockaddr*)&server_addr, sizeof(server_addr)) == -1) {
+        cerr << "bind failed: " << strerror(errno) << endl;
+        close(server_fd);
+        return -1;
+    }
+
+    if (listen(server_fd, 5) == -1) {
+        cerr << "listen failed" << endl;
+        close(server_fd);
+        return -1;
+    }
+    
+    return server_fd;
+}
+
+int AcceptClient(int server_fd, string& client_ip, int& client_port) {
+    struct sockaddr_in client_addr;
+    socklen_t client_len = sizeof(client_addr);
+
+    int client_fd = accept(server_fd, (struct sockaddr*)&client_addr, &client_len);
+    if (client_fd == -1) {
+        cerr << "accept failed" << endl;
+        return -1;
+    }
+
+    char ip_str[INET_ADDRSTRLEN];
+    inet_ntop(AF_INET, &client_addr.sin_addr, ip_str, INET_ADDRSTRLEN);
+    client_ip = string(ip_str);
+    client_port = ntohs(client_addr.sin_port);
+
+    return client_fd;
+}
+
+bool SendResponse(int client_fd, const string& response) {
+    string msg = response + "\r\n";
+    return send(client_fd, msg.c_str(), msg.size(), 0) != -1;
+}
+
+bool SendGreeting(int client_fd) {
+    const char* greeting = "220 ready\r\n";
+    if (send(client_fd, greeting, strlen(greeting), 0) == -1) {
+        cerr << "send failed" << endl;
+        return false;
+    }
+    return true;
+}
+
+void ProcessCommand(int client_fd, const string& cmd, bool& quit) {
+    size_t space = cmd.find(' ');
+    string op = cmd.substr(0, space);
+    transform(op.begin(), op.end(), op.begin(), ::toupper);
+    string arg = (space == string::npos) ? "" : cmd.substr(space+1);
+
+    if (op == "USER") {
+    SendResponse(client_fd, "331 User name okay, need password.");
+    }
+    else if (op == "PASS") {
+        SendResponse(client_fd, "230 User logged in.");
+    }
+    else if (op == "PASV") {
+        SendResponse(client_fd, "227 Entering Passive Mode (127,0,0,1,19,136).");
+    }
+    else if (op == "QUIT") {
+        SendResponse(client_fd, "221 Goodbye.");
+        quit = true;
+    }
+    else {
+        SendResponse(client_fd, "500 Unknown command.");
+    }
+}
+
+void ReceiveClientData(int client_fd) {
+    char buf[1024];
+    string line_buf;
+    bool quit = false;
+
+    while (!quit) {
+        memset(buf, 0, sizeof(buf));
+        int count = recv(client_fd, buf, sizeof(buf) - 1, 0);
+        if (count <= 0) break;
+
+        line_buf.append(buf, count);
+        size_t pos;
+        while ((pos = line_buf.find("\r\n")) != string::npos) {
+            string cmd = line_buf.substr(0, pos);
+            line_buf.erase(0, pos+2);
+
+            {
+                lock_guard<mutex> lock(cout_mtx);
+                cout << "[Received] : " << cmd << endl;
+            }
+
+            ProcessCommand(client_fd, cmd, quit);
+            if (quit) break;
+        }
+    }
+}
+
+void HandleClient(int client_fd, const string& client_ip, int client_port) {
+    if (!SendGreeting(client_fd)) {
+        close(client_fd);
+        return;
+    }
+
+    ReceiveClientData(client_fd);
+    {
+        lock_guard<mutex> lock(cout_mtx);
+        cout << "客户端已断开" << endl;
+    }
+    close(client_fd);
+}
+
+void RunServer(int port) {
+    int server_fd = CreateServerSocket(port);
+    if (server_fd == -1) return;
+
+    {
+        lock_guard<mutex> lock(cout_mtx);
+        cout << "listening " << port << "..." << endl;
+    }
+
+    while (true) {
+        string client_ip;
+        int client_port;
+
+        int client_fd = AcceptClient(server_fd, client_ip, client_port);
+        if (client_fd == -1) continue;
+
+        {
+            lock_guard<mutex> lock(cout_mtx);
+            cout << client_ip << " : " << client_port << endl;
+        }
+
+        thread thr(HandleClient, client_fd, client_ip, client_port);
+        thr.detach();
+    }
+    close(server_fd);
+}
+
+int main() {
+    const int port = 2100;
+    RunServer(port);
+    return 0;
+}
