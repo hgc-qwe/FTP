@@ -457,8 +457,15 @@ void ProcessCommand(int client_fd, const string& cmd, bool& quit, int& data_list
         ssize_t remaining = st.st_size - offset;
         SendResponse(client_fd, "150 Opening data connection.");
 
-        int data_client_fd = accept(data_listen_fd, nullptr, nullptr);
-        if (data_client_fd == -1) {
+        int data_client_fd;
+
+        while (true) {
+            data_client_fd = accept(data_listen_fd, nullptr, nullptr);
+            if (data_client_fd >= 0)
+                break;
+            if (errno == EINTR)
+                continue;
+
             SendResponse(client_fd, "425 Can't open data connection.");
             close(file_fd);
             close(data_listen_fd);
@@ -499,8 +506,16 @@ void ProcessCommand(int client_fd, const string& cmd, bool& quit, int& data_list
         }
 
         
-        string virtual_path = session.normalize(arg);
-        string real_path = virtual_path;
+        const string SERVER_UPLOAD_ROOT = "./ftp_storage";
+        string filename;
+        size_t pos2 = arg.find_last_of('/');
+
+        if (pos2 == string::npos)
+            filename = arg;
+        else
+            filename = arg.substr(pos2 + 1);
+
+        string real_path = SERVER_UPLOAD_ROOT + "/" + filename;
         size_t pos = real_path.find_last_of('/');
 
         if (pos != string::npos) {
@@ -537,9 +552,15 @@ void ProcessCommand(int client_fd, const string& cmd, bool& quit, int& data_list
 
         SendResponse(client_fd, "150 Opening data connection.");
 
-        int data_client_fd = accept(data_listen_fd, nullptr, nullptr);
+        int data_client_fd;
 
-        if (data_client_fd == -1) {
+        while (true) {
+            data_client_fd = accept(data_listen_fd, nullptr, nullptr);
+            if (data_client_fd >= 0)
+                break;
+            if (errno == EINTR)
+                continue;
+
             SendResponse(client_fd, "425 Can't open data connection.");
             fclose(fp);
             close(data_listen_fd);
@@ -812,7 +833,6 @@ int CreateDataListener(int& data_port) {
         return -1;
     }
     data_port = ntohs(data_addr.sin_port);
-    SetNonBlocking(data_fd);
     return data_fd;
 }
 

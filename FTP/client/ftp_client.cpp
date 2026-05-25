@@ -168,11 +168,13 @@ void Download(int fd) {
     }
 
     string remote_file;
+    string local_file;
 
     cout << "remote file path(example: /tmp/test/a.txt): ";
     cin >> remote_file;
 
-    string local_file = "./download" + remote_file;
+    cout << "local save path(example: /home/hgc/Download/a.txt): ";
+    cin >> local_file;
 
     int data_fd = PASV(fd);
     if (data_fd == -1) return;
@@ -214,7 +216,7 @@ void Download(int fd) {
 
     char buf[4096];
     int n;
-    while ((n = recv(data_fd, buf, sizeof(buf) - 1, 0)) > 0) {
+    while ((n = recv(data_fd, buf, sizeof(buf), 0)) > 0) {
         fwrite(buf, 1, n, fp);
     }
     fclose(fp);
@@ -237,25 +239,19 @@ void Upload(int fd) {
     }
 
     string local_file;
-    string remote_dir;
-    string remote_name;
 
     cout << "local file(example: /home/xxx/upload/a.txt): ";
     cin >> local_file;
 
-    cout << "remote dir(example: /tmp/ftp/test): ";
-    cin >> remote_dir;
+    string filename;
+    size_t pos = local_file.find_last_of('/');
 
-    cout << "remote filename(example: hello.txt): ";
-    cin >> remote_name;
-
-    string remote_file;
-
-    if (remote_dir.back() == '/')
-        remote_file = remote_dir + remote_name;
+    if (pos == string::npos)
+        filename = local_file;
     else
-        remote_file = remote_dir + "/" + remote_name;
+        filename = local_file.substr(pos + 1);
 
+    string remote_file = filename;
     FILE* fp = fopen(local_file.c_str(), "rb");
     if (!fp) {
         perror("fopen");
