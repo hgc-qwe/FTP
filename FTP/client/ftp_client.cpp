@@ -19,6 +19,26 @@ void PrintMenu() {
     cout << "choice: ";
 }
 
+bool MakeDirs(const string& dir) {
+    if (dir.empty()) return false;
+
+    string path;
+
+    for (size_t i = 0; i < dir.size(); i++) {
+        path += dir[i];
+
+        if (dir[i] == '/') {
+            if (path.size() == 1) continue;
+
+            mkdir(path.c_str(), 0755);
+        }
+    }
+
+    mkdir(dir.c_str(), 0755);
+
+    return true;
+}
+
 int ConnectServer() {
     int cfd = socket(AF_INET, SOCK_STREAM, 0);
     if (cfd == -1) {
@@ -147,9 +167,12 @@ void Download(int fd) {
     return;
     }
 
-    string filename;
-    cout << "filename: ";
-    cin >> filename;
+    string remote_file;
+
+    cout << "remote file path(example: /tmp/test/a.txt): ";
+    cin >> remote_file;
+
+    string local_file = "./download" + remote_file;
 
     int data_fd = PASV(fd);
     if (data_fd == -1) return;
@@ -157,13 +180,13 @@ void Download(int fd) {
     struct stat st;
     off_t offset = 0;
 
-    if (stat(filename.c_str(), &st) == 0) offset = st.st_size;
+    if (stat(local_file.c_str(), &st) == 0) offset = st.st_size;
     if (offset > 0) {
         SendCommand(fd, "REST " + to_string(offset));
         cout << ReadResponse(fd);
     }
 
-    SendCommand(fd, "RETR " + filename);
+    SendCommand(fd, "RETR " + remote_file);
     string resp = ReadResponse(fd);
     cout << resp;
     if (resp.find("150") == string::npos) {
@@ -171,9 +194,17 @@ void Download(int fd) {
         return;
     }
 
+    size_t pos = local_file.find_last_of('/');
+
+    if (pos != string::npos) {
+        string dir = local_file.substr(0, pos);
+
+        MakeDirs(dir);
+    }
+
     FILE* fp;
-    if (offset > 0) fp = fopen(filename.c_str(), "ab");
-    else fp = fopen(filename.c_str(), "wb");
+    if (offset > 0) fp = fopen(local_file.c_str(), "ab");
+    else fp = fopen(local_file.c_str(), "wb");
 
     if (!fp) {
         perror("fopen");
@@ -205,21 +236,37 @@ void Upload(int fd) {
     return;
     }
 
-    string filename;
-    cout << "filename: ";
-    cin >> filename;
+    string local_file;
+    string remote_dir;
+    string remote_name;
 
-    long long offset = GetFileSize(fd, filename);
+    cout << "local file(example: /home/xxx/upload/a.txt): ";
+    cin >> local_file;
+
+    cout << "remote dir(example: /tmp/ftp/test): ";
+    cin >> remote_dir;
+
+    cout << "remote filename(example: hello.txt): ";
+    cin >> remote_name;
+
+    string remote_file;
+
+    if (remote_dir.back() == '/')
+        remote_file = remote_dir + remote_name;
+    else
+        remote_file = remote_dir + "/" + remote_name;
+
+    FILE* fp = fopen(local_file.c_str(), "rb");
+    if (!fp) {
+        perror("fopen");
+        return;
+    }
+
+    long long offset = GetFileSize(fd, remote_file);
 
     if (offset > 0) {
         SendCommand(fd, "REST " + to_string(offset));
         cout << ReadResponse(fd);
-    }
-
-    FILE* fp = fopen(filename.c_str(), "rb");
-    if (!fp) {
-        perror("fopen");
-        return;
     }
 
     fseek(fp, offset, SEEK_SET);
@@ -230,7 +277,7 @@ void Upload(int fd) {
         return;
     }
 
-    SendCommand(fd, "STOR " + filename);
+    SendCommand(fd, "STOR " + remote_file);
     string resp = ReadResponse(fd);
     cout << resp;
     if (resp.find("150") == string::npos) {

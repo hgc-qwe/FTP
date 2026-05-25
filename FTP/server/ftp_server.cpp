@@ -21,6 +21,7 @@
 #include <dirent.h>
 #include <stdlib.h>
 #include <time.h>
+#include <limits.h>
 #include <unistd.h>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -31,7 +32,7 @@ using namespace std;
 mutex cout_mtx;
 
 struct ClientSession {
-    string root_path = ".";
+    string root_path = "";
     string current_dir = "/";
     bool logged_in = false;
     string username;
@@ -76,9 +77,28 @@ struct ClientSession {
 
     string getRealPath(const string& filepath) {
         string virtual_path = normalize(filepath);
-        string real = root_path + virtual_path;
-        if (real.find(root_path) != 0) return "";
-        return real;
+        string real_path;
+
+        if (root_path.empty()) {
+            real_path = virtual_path;
+        } else {
+            real_path = root_path + virtual_path;
+        }
+
+        char resolved[PATH_MAX];
+
+        if (realpath(real_path.c_str(), resolved) == nullptr) {
+            return "";
+        }
+
+        string final_path = resolved;
+
+        if (!root_path.empty() &&
+            final_path.find(root_path) != 0) {
+            return "";
+        }
+
+        return final_path;
     }
 };
 
@@ -148,22 +168,6 @@ typedef struct {
 
 #define MAX_FILES 1000
 
-#define COLOR_RESET         "\033[0m"
-#define COLOR_DIR           "\033[1;34m"   
-#define COLOR_EXEC          "\033[1;32m"   
-#define COLOR_SYMLINK       "\033[1;36m"   
-#define COLOR_SOCKET        "\033[1;32m"   
-#define COLOR_PIPE          "\033[1;33m"   
-#define COLOR_BLOCK_DEVICE  "\033[1;33;44m" 
-#define COLOR_CHAR_DEVICE   "\033[1;33;43m" 
-#define COLOR_ARCHIVE       "\033[1;31m"     
-#define COLOR_IMAGE         "\033[35m"     
-#define COLOR_VIDEO         "\033[1;35m"   
-#define COLOR_AUDIO         "\033[1;36m"   
-#define COLOR_DOCUMENT      "\033[1;37m"   
-#define COLOR_CODE          "\033[1;36m"
-#define COLOR_TEXT          "\033[37m"
-
 bool SetNonBlocking(int fd);
 int CreateServerSocket(int port);
 int AcceptClient(int server_fd, std::string& client_ip, int& client_port);
@@ -175,14 +179,26 @@ void HandleClient(int client_fd, const std::string& client_ip, int client_port);
 void HandleClientNonBlocking(int client_fd, int epoll_fd);
 int CreateDataListener(int& data_port);
 void RunServer(int port);
-int compare_by_time(const void* a, const void* b);
-int compare(const void* a, const void* b);
-int compare_by_reverse(const void* a, const void* b);
-int compare_by_time_reverse(const void* a, const void* b);
-const char* type_func1(const char* filename);
-const char* type_func2(const char* path, const char* filename);
-char get_type(mode_t mode);
-void get_permission_string(mode_t mode, char* perm);
+
+bool MakeDirs(const string& dir) {
+    if (dir.empty()) return false;
+
+    string path;
+
+    for (size_t i = 0; i < dir.size(); i++) {
+        path += dir[i];
+
+        if (dir[i] == '/') {
+            if (path.size() == 1) continue;
+
+            mkdir(path.c_str(), 0755);
+        }
+    }
+
+    mkdir(dir.c_str(), 0755);
+
+    return true;
+}
 
 bool SetNonBlocking(int fd) {
     int flags = fcntl(fd, F_GETFL, 0);
@@ -263,139 +279,6 @@ int compare(const void* a, const void* b) {
     return strcoll(fa->name, fb->name);
 }
 
-int compare_by_time(const void* a, const void* b) {
-    const File* fa = (const File*)a;
-    const File* fb = (const File*)b;
-
-    if (fb->mtime > fa->mtime) return 1;
-    if (fb->mtime < fa->mtime) return -1;
-    return 0;
-}
-
-int compare_by_reverse(const void* a, const void* b) {
-    const File* fa = (const File*)a;
-    const File* fb = (const File*)b;
-    return -strcoll(fa->name, fb->name);
-}
-
-int compare_by_time_reverse(const void* a, const void* b) {
-    const File* fa = (const File*)a;
-    const File* fb = (const File*)b;
-
-    if (fb->mtime > fa->mtime) return -1;
-    if (fb->mtime < fa->mtime) return 1;
-    return 0;
-}
-
-const char* type_func1(const char* filename) {
-    const char* idx = strrchr(filename, '.');
-    if (idx == NULL) return COLOR_TEXT;
-
-    idx++;
-
-    if (strcmp(idx, "zip") == 0 || strcmp(idx, "tar") == 0 ||
-        strcmp(idx, "gz") == 0 || strcmp(idx, "bz2") == 0 ||
-        strcmp(idx, "xz") == 0 || strcmp(idx, "7z") == 0 ||
-        strcmp(idx, "rar") == 0 || strcmp(idx, "z") == 0 ||
-        strcmp(idx, "deb") == 0 || strcmp(idx, "rpm") == 0 ||
-        strcmp(idx, "tgz") == 0 || strcmp(idx, "tbz2") == 0 ||
-        strcmp(idx, "jar") == 0 || strcmp(idx, "war") == 0 ||
-        strcmp(idx, "apk") == 0) {
-        return COLOR_ARCHIVE;
-    }
-
-    if (strcmp(idx, "jpg") == 0 || strcmp(idx, "jpeg") == 0||
-        strcmp(idx, "png") == 0 || strcmp(idx, "gif") == 0 ||
-        strcmp(idx, "bmp") == 0 || strcmp(idx, "svg") == 0 ||
-        strcmp(idx, "ico") == 0 || strcmp(idx, "svg") == 0 ||
-        strcmp(idx, "tiff") == 0) {
-        return COLOR_IMAGE;
-    }
-
-    if (strcmp(idx, "pdf") == 0 || strcmp(idx, "doc") == 0 ||
-        strcmp(idx, "docx") == 0 || strcmp(idx, "ppt") == 0 ||
-        strcmp(idx, "pptx") == 0 || strcmp(idx, "xls") == 0 ||
-        strcmp(idx, "xlsx") == 0 || strcmp(idx, "txt") == 0 ||
-        strcmp(idx, "md") == 0 || strcmp(idx, "tex") == 0) {
-        return COLOR_DOCUMENT;
-    }
-
-    if (strcmp(idx, "c") == 0 || strcmp(idx, "cpp") == 0 ||
-        strcmp(idx, "h") == 0 || strcmp(idx, "hpp") == 0 ||
-        strcmp(idx, "py") == 0 || strcmp(idx, "java") == 0 ||
-        strcmp(idx, "js") == 0 || strcmp(idx, "html") == 0 ||
-        strcmp(idx, "css") == 0 || strcmp(idx, "php") == 0 ||
-        strcmp(idx, "sh") == 0 || strcmp(idx, "pl") == 0 ||
-        strcmp(idx, "rb") == 0 || strcmp(idx, "go") == 0 ||
-        strcmp(idx, "rs") == 0) {
-        return COLOR_CODE;
-    }
-
-    return COLOR_TEXT;
-}
-
-const char* type_func2(const char* path, const char* filename) {
-    size_t path_len = strlen(path) + strlen(filename) + 2;
-    char* fullpath = (char*)malloc(path_len);
-    if (!fullpath) return COLOR_RESET;
-
-    snprintf(fullpath, path_len, "%s/%s", path, filename);
-
-    struct stat st;
-    if (lstat(fullpath, &st) != 0) {
-        free(fullpath);
-        return COLOR_RESET;
-    }
-    if (S_ISDIR(st.st_mode)) {
-        return COLOR_DIR;
-    }
-    else if (S_ISLNK(st.st_mode)) {
-        return COLOR_SYMLINK;
-    }
-    else if (S_ISSOCK(st.st_mode)) {
-        return COLOR_SOCKET;
-    }
-    else if (S_ISFIFO(st.st_mode)) {
-        return COLOR_PIPE;
-    }
-    else if (S_ISBLK(st.st_mode)) {
-        return COLOR_BLOCK_DEVICE;
-    }
-    else if (S_ISCHR(st.st_mode)) {
-        return COLOR_CHAR_DEVICE;
-    }
-    else if (S_ISREG(st.st_mode)) {
-        if (st.st_mode & (S_IXUSR | S_IXGRP | S_IXOTH)) {
-            return COLOR_EXEC;
-        }
-        return type_func1(filename);
-    }
-    return COLOR_TEXT;
-}
-
-char get_type(mode_t mode) {
-    if (S_ISDIR(mode)) return 'd';
-    if (S_ISLNK(mode)) return 'l';
-    if (S_ISCHR(mode)) return 'c';
-    if (S_ISBLK(mode)) return 'b';
-    if (S_ISFIFO(mode)) return 'p';
-    if (S_ISSOCK(mode)) return 's';
-    return '-';
-}
-
-void get_permission_string(mode_t mode, char* perm) {
-    perm[0] = (mode & S_IRUSR) ? 'r' : '-';
-    perm[1] = (mode & S_IWUSR) ? 'w' : '-';
-    perm[2] = (mode & S_IXUSR) ? 'x' : '-';
-    perm[3] = (mode & S_IRGRP) ? 'r' : '-';
-    perm[4] = (mode & S_IWGRP) ? 'w' : '-';
-    perm[5] = (mode & S_IXGRP) ? 'x' : '-';
-    perm[6] = (mode & S_IROTH) ? 'r' : '-';
-    perm[7] = (mode & S_IWOTH) ? 'w' : '-';
-    perm[8] = (mode & S_IXOTH) ? 'x' : '-';
-    perm[9] = '\0';
-}
-
 string GenerateList(const string& path) {
     DIR* dir = opendir(path.c_str());
     if (!dir) return "550 Failed to open directory.\r\n";
@@ -458,6 +341,13 @@ void ProcessCommand(int client_fd, const string& cmd, bool& quit, int& data_list
             SendResponse(client_fd, "503 Login with USER first.");
         } else if (session.username == "hgc-qwe" && arg == "1234567") {
             session.logged_in = true;
+
+            char cwd[PATH_MAX];
+            getcwd(cwd, sizeof(cwd));
+
+            session.root_path = "";
+            session.current_dir = "/";
+
             SendResponse(client_fd, "230 User logged in.");
         } else if (session.username == "anonymous") {
             session.logged_in = true;
@@ -494,7 +384,7 @@ void ProcessCommand(int client_fd, const string& cmd, bool& quit, int& data_list
         }
 
         string real_path = session.getRealPath(arg.empty() ? "." : arg);
-        string path = real_path.empty() ? "." : real_path;
+        
         if (real_path.empty()) {
             SendResponse(client_fd, "550 Permission denied.");
             return;
@@ -539,9 +429,9 @@ void ProcessCommand(int client_fd, const string& cmd, bool& quit, int& data_list
             return;
         }
 
-        string real_path = session.getRealPath(arg.empty() ? "." : arg);
+        string real_path = session.getRealPath(arg);
         if (real_path.empty()) {
-            SendResponse(client_fd, "501 No filename given.");
+            SendResponse(client_fd, "550 Invalid file path.");
             return;
         }
 
@@ -592,55 +482,88 @@ void ProcessCommand(int client_fd, const string& cmd, bool& quit, int& data_list
         SendResponse(client_fd, "226 Transfer complete.");
     }
     else if (op == "STOR") {
+
         if (!session.logged_in) {
             SendResponse(client_fd, "530 Please login with USER and PASS.");
             return;
         }
+
         if (data_listen_fd == -1) {
             SendResponse(client_fd, "425 Use PORT or PASV first.");
             return;
         }
 
-        string real_path = session.getRealPath(arg.empty() ? "." : arg);
-        if (real_path.empty()) {
+        if (arg.empty()) {
             SendResponse(client_fd, "501 No filename given.");
             return;
         }
 
-        FILE* fp;
+        
+        string virtual_path = session.normalize(arg);
+        string real_path = virtual_path;
+        size_t pos = real_path.find_last_of('/');
+
+        if (pos != string::npos) {
+            string dir = real_path.substr(0, pos);
+            MakeDirs(dir);
+        }
+
+        FILE* fp = nullptr;
+
         if (session.restart_offset > 0) {
+
             fp = fopen(real_path.c_str(), "r+b");
+
             if (fp != nullptr) {
                 fseek(fp, session.restart_offset, SEEK_SET);
             } else {
                 fp = fopen(real_path.c_str(), "wb");
             }
+
         } else {
+
             fp = fopen(real_path.c_str(), "wb");
         }
+
         if (fp == nullptr) {
-            SendResponse(client_fd, "550 Failed to creat file.");
+            SendResponse(client_fd, "550 Failed to create file.");
+
             close(data_listen_fd);
             data_listen_fd = -1;
+
+            session.restart_offset = 0;
             return;
         }
 
         SendResponse(client_fd, "150 Opening data connection.");
 
         int data_client_fd = accept(data_listen_fd, nullptr, nullptr);
+
         if (data_client_fd == -1) {
             SendResponse(client_fd, "425 Can't open data connection.");
             fclose(fp);
             close(data_listen_fd);
             data_listen_fd = -1;
+            session.restart_offset = 0;
             return;
         }
 
         char buf[8192];
-        size_t n;
+        ssize_t n;
+
         while ((n = recv(data_client_fd, buf, sizeof(buf), 0)) > 0) {
-            fwrite(buf, 1, n, fp);
+            size_t written = fwrite(buf, 1, n, fp);
+            if (written != (size_t)n) {
+                SendResponse(client_fd, "451 Write file failed.");
+                fclose(fp);
+                close(data_client_fd);
+                close(data_listen_fd);
+                data_listen_fd = -1;
+                session.restart_offset = 0;
+                return;
+            }
         }
+
         fclose(fp);
         close(data_client_fd);
         close(data_listen_fd);
@@ -690,7 +613,7 @@ void ProcessCommand(int client_fd, const string& cmd, bool& quit, int& data_list
         }
         struct stat st;
         string real_path = session.getRealPath(arg.empty() ? "." : arg);
-        if (stat(real_path.c_str(), &st) == 0) {
+        if (stat(real_path.c_str(), &st) == 0 && S_ISREG(st.st_mode)) {
             SendResponse(client_fd, "213 " + to_string(st.st_size));
         } else {
             SendResponse(client_fd, "550 File not found.");
@@ -716,19 +639,23 @@ void ProcessCommand(int client_fd, const string& cmd, bool& quit, int& data_list
             SendResponse(client_fd, "530 Please login with USER and PASS.");
             return;
         }
-        string new_virtual = session.normalize(arg);
-        string real_path = session.root_path + new_virtual;
+
+        string real_path = session.getRealPath(arg);
+
+        if (real_path.empty()) {
+            SendResponse(client_fd, "550 Permission denied.");
+            return;
+        }
 
         struct stat st;
+
         if (stat(real_path.c_str(), &st) == 0 && S_ISDIR(st.st_mode)) {
-            session.current_dir = new_virtual;
+
+            session.current_dir = session.normalize(arg);
             SendResponse(client_fd, "250 Directory changed.");
         } else {
             SendResponse(client_fd, "550 Directory not found.");
         }
-    }
-    else {
-        SendResponse(client_fd, "500 Unknown command.");
     }
 }
 
