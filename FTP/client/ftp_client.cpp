@@ -61,15 +61,41 @@ int ConnectServer() {
 }
 
 string ReadResponse(int fd) {
-    char buf[4096] = {0};
-    int n = recv(fd, buf, sizeof(buf) - 1, 0);
-    if (n <= 0) return "";
-    return string(buf, n);
+    string line;
+    char ch;
+
+    while (true) {
+        int n = recv(fd, &ch, 1, 0);
+
+        if (n <= 0) break;
+
+        line += ch;
+
+        if (line.size() >= 2 &&
+            line.substr(line.size() - 2) == "\r\n") {
+            break;
+        }
+    }
+
+    return line;
 }
 
 void SendCommand(int fd, const string& cmd) {
     string msg = cmd + "\r\n";
-    send(fd, msg.c_str(), msg.size(), 0);
+
+    int total = 0;
+
+    while (total < msg.size()) {
+
+        int sent = send(fd,msg.c_str() + total,msg.size() - total,0);
+
+        if (sent <= 0) {
+            perror("send");
+            return;
+        }
+
+        total += sent;
+    }
 }
 
 void Login(int fd) {
@@ -111,7 +137,7 @@ int PASV(int fd) {
     string response = ReadResponse(fd);
     int a, b, c, d, p1, p2;
     if (sscanf(response.c_str(), "%*[^(](%d,%d,%d,%d,%d,%d)", &a, &b, &c, &d, &p1, &p2) != 6) {
-        cerr << "PASV failed" << endl;
+        cerr << "PASV failed: " << response << endl;
         return -1;
     }
     int port = p1 * 256 + p2;
@@ -149,7 +175,14 @@ void List(int fd) {
     if (data_fd == -1) return;
 
     SendCommand(fd, "LIST " + path);
-    cout << ReadResponse(fd);
+
+    string resp = ReadResponse(fd);
+    cout << resp;
+
+    if (resp.find("150") == string::npos) {
+        close(data_fd);
+        return;
+    }
 
     char buf[4096];
     int n;
@@ -163,50 +196,53 @@ void List(int fd) {
 
 void Download(int fd) {
     if (!logged_in) {
-    cout << "please login first" << endl;
-    return;
+        cout << "please login first" << endl;
+        return;
     }
 
     string remote_file;
-    string local_file;
 
     cout << "remote file path(example: /tmp/test/a.txt): ";
     cin >> remote_file;
 
-    cout << "local save path(example: /home/hgc/Download/a.txt): ";
-    cin >> local_file;
+    string save_dir;
+
+    cout << "save dir(example: /home/hgc/downloads): ";
+    cin >> save_dir;
+
+    string filename;
+
+    size_t pos = remote_file.find_last_of('/');
+
+    if (pos == string::npos)
+        filename = remote_file;
+    else
+        filename = remote_file.substr(pos + 1);
+
+    string local_file = save_dir + "/" + filename;
 
     int data_fd = PASV(fd);
     if (data_fd == -1) return;
 
-    struct stat st;
-    off_t offset = 0;
-
-    if (stat(local_file.c_str(), &st) == 0) offset = st.st_size;
-    if (offset > 0) {
-        SendCommand(fd, "REST " + to_string(offset));
-        cout << ReadResponse(fd);
-    }
-
     SendCommand(fd, "RETR " + remote_file);
+
     string resp = ReadResponse(fd);
     cout << resp;
+
     if (resp.find("150") == string::npos) {
         close(data_fd);
         return;
     }
 
-    size_t pos = local_file.find_last_of('/');
+    size_t pos2 = local_file.find_last_of('/');
 
-    if (pos != string::npos) {
-        string dir = local_file.substr(0, pos);
+    if (pos2 != string::npos) {
+        string dir = local_file.substr(0, pos2);
 
         MakeDirs(dir);
     }
 
-    FILE* fp;
-    if (offset > 0) fp = fopen(local_file.c_str(), "ab");
-    else fp = fopen(local_file.c_str(), "wb");
+    FILE* fp = fopen(local_file.c_str(), "wb");
 
     if (!fp) {
         perror("fopen");
@@ -216,20 +252,23 @@ void Download(int fd) {
 
     char buf[4096];
     int n;
+
     while ((n = recv(data_fd, buf, sizeof(buf), 0)) > 0) {
-        fwrite(buf, 1, n, fp);
+        size_t written = fwrite(buf, 1, n, fp);
+
+        if (written != (size_t)n) {
+            perror("fwrite");
+            break;
+        }
     }
+
     fclose(fp);
+    shutdown(data_fd, SHUT_RDWR);
     close(data_fd);
+
     cout << ReadResponse(fd);
-}
 
-long long GetFileSize(int fd, const string& filename) {
-    SendCommand(fd, "SIZE " + filename);
-    string resp = ReadResponse(fd);
-    if (resp.find("213") != string::npos) return stoll(resp.substr(4));
-
-    return 0;
+    cout << "saved to: " << local_file << endl;
 }
 
 void Upload(int fd) {
@@ -258,15 +297,6 @@ void Upload(int fd) {
         return;
     }
 
-    long long offset = GetFileSize(fd, remote_file);
-
-    if (offset > 0) {
-        SendCommand(fd, "REST " + to_string(offset));
-        cout << ReadResponse(fd);
-    }
-
-    fseek(fp, offset, SEEK_SET);
-
     int data_fd = PASV(fd);
     if (data_fd == -1) {
         fclose(fp);
@@ -285,9 +315,30 @@ void Upload(int fd) {
     char buf[4096];
     int n;
     while ((n = fread(buf, 1, sizeof(buf), fp)) > 0) {
-        send(data_fd, buf, n, 0);
+
+        int total = 0;
+
+        while (total < n) {
+
+            int sent = send(data_fd,buf + total,n - total,0);
+
+            if (sent <= 0) {
+                perror("send");
+                fclose(fp);
+                shutdown(data_fd, SHUT_RDWR);
+                close(data_fd);
+                return;
+            }
+
+            total += sent;
+        }
     }
+    if (ferror(fp)) {
+        perror("fread");
+    }
+
     fclose(fp);
+    shutdown(data_fd, SHUT_WR);
     close(data_fd);
     cout << ReadResponse(fd);
 }

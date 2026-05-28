@@ -36,7 +36,6 @@ struct ClientSession {
     string current_dir = "/";
     bool logged_in = false;
     string username;
-    off_t restart_offset = 0;
 
     string normalize(const string& path) {
         if (path.empty()) return current_dir;
@@ -401,18 +400,38 @@ void ProcessCommand(int client_fd, const string& cmd, bool& quit, int& data_list
         
         int data_client_fd = accept(data_listen_fd, nullptr, nullptr);
         if (data_client_fd == -1) {
-            SendResponse(client_fd, "425 Can't open data_connection.");
-            closedir(dir);
+
+            if (errno == EAGAIN ||
+                errno == EWOULDBLOCK) {
+
+                SendResponse(client_fd,"425 Data connection timeout.");
+
+            } else {
+
+                SendResponse(client_fd,"425 Can't open data connection.");
+            }
+
             close(data_listen_fd);
             data_listen_fd = -1;
+
             return;
         }
 
         string listing = GenerateList(real_path);
         
         closedir(dir);
-        send(data_client_fd, listing.c_str(), listing.size(), 0);
+        size_t total = 0;
 
+        while (total < listing.size()) {
+
+            ssize_t sent = send(data_client_fd,listing.c_str() + total,listing.size() - total,0);
+
+            if (sent <= 0) {
+                break;
+            }
+
+            total += sent;
+        }
         close(data_client_fd);
         close(data_listen_fd);
         data_listen_fd = -1;
@@ -445,15 +464,7 @@ void ProcessCommand(int client_fd, const string& cmd, bool& quit, int& data_list
 
         struct stat st;
         fstat(file_fd, &st);
-        off_t offset = session.restart_offset;
-        if (offset > st.st_size) {
-            SendResponse(client_fd, "550 offset exceeds file size.");
-            close(file_fd);
-            close(data_listen_fd);
-            data_listen_fd = -1;
-            session.restart_offset = 0;
-            return;
-        }
+        off_t offset = 0;
         ssize_t remaining = st.st_size - offset;
         SendResponse(client_fd, "150 Opening data connection.");
 
@@ -461,12 +472,20 @@ void ProcessCommand(int client_fd, const string& cmd, bool& quit, int& data_list
 
         while (true) {
             data_client_fd = accept(data_listen_fd, nullptr, nullptr);
-            if (data_client_fd >= 0)
+
+            if (data_client_fd >= 0) {
                 break;
+            }
+
             if (errno == EINTR)
                 continue;
 
-            SendResponse(client_fd, "425 Can't open data connection.");
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                SendResponse(client_fd, "425 Data connection timeout.");
+            } else {
+                SendResponse(client_fd, "425 Can't open data connection.");
+            }
+
             close(file_fd);
             close(data_listen_fd);
             data_listen_fd = -1;
@@ -474,18 +493,33 @@ void ProcessCommand(int client_fd, const string& cmd, bool& quit, int& data_list
         }
 
         while (remaining > 0) {
-            ssize_t sent = sendfile(data_client_fd, file_fd, &offset, remaining);
-            if (sent <= 0) {
-                if (errno == EINTR) continue;
+
+            ssize_t sent = sendfile(data_client_fd,file_fd,&offset,remaining);
+
+            if (sent > 0) {
+                remaining -= sent;
+                continue;
+            }
+
+            if (sent == 0) {
                 break;
             }
-            remaining -= sent;
+
+            if (errno == EINTR) {
+                continue;
+            }
+
+            if (errno == EAGAIN ||errno == EWOULDBLOCK) {
+                continue;
+            }
+
+            perror("sendfile");
+            break;
         }
         close(file_fd);
         close(data_client_fd);
         close(data_listen_fd);
         data_listen_fd = -1;
-        session.restart_offset = 0;
         SendResponse(client_fd, "226 Transfer complete.");
     }
     else if (op == "STOR") {
@@ -523,30 +557,14 @@ void ProcessCommand(int client_fd, const string& cmd, bool& quit, int& data_list
             MakeDirs(dir);
         }
 
-        FILE* fp = nullptr;
-
-        if (session.restart_offset > 0) {
-
-            fp = fopen(real_path.c_str(), "r+b");
-
-            if (fp != nullptr) {
-                fseek(fp, session.restart_offset, SEEK_SET);
-            } else {
-                fp = fopen(real_path.c_str(), "wb");
-            }
-
-        } else {
-
-            fp = fopen(real_path.c_str(), "wb");
-        }
+        FILE* fp = fopen(real_path.c_str(), "wb");
+        
 
         if (fp == nullptr) {
             SendResponse(client_fd, "550 Failed to create file.");
 
             close(data_listen_fd);
             data_listen_fd = -1;
-
-            session.restart_offset = 0;
             return;
         }
 
@@ -556,32 +574,58 @@ void ProcessCommand(int client_fd, const string& cmd, bool& quit, int& data_list
 
         while (true) {
             data_client_fd = accept(data_listen_fd, nullptr, nullptr);
-            if (data_client_fd >= 0)
+            if (data_client_fd >= 0) {
                 break;
+            }
+
             if (errno == EINTR)
                 continue;
+
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                SendResponse(client_fd,"425 Data connection timeout.");
+
+            } else {
+                SendResponse(client_fd,"425 Can't open data connection.");
+            }
+
+            close(data_listen_fd);
+            data_listen_fd = -1;
+
+            return;
+            
 
             SendResponse(client_fd, "425 Can't open data connection.");
             fclose(fp);
             close(data_listen_fd);
             data_listen_fd = -1;
-            session.restart_offset = 0;
             return;
         }
 
         char buf[8192];
         ssize_t n;
 
-        while ((n = recv(data_client_fd, buf, sizeof(buf), 0)) > 0) {
-            size_t written = fwrite(buf, 1, n, fp);
-            if (written != (size_t)n) {
-                SendResponse(client_fd, "451 Write file failed.");
-                fclose(fp);
-                close(data_client_fd);
-                close(data_listen_fd);
-                data_listen_fd = -1;
-                session.restart_offset = 0;
-                return;
+        while (true) {
+            n = recv(data_client_fd, buf, sizeof(buf), 0);
+
+            if (n > 0) {
+                size_t written = fwrite(buf, 1, n, fp);
+
+                if (written != (size_t)n) {
+                    SendResponse(client_fd, "451 Write file failed.");
+                    fclose(fp);
+                    close(data_client_fd);
+                    close(data_listen_fd);
+                    data_listen_fd = -1;
+                    return;
+                }
+
+            } else if (n == 0) {
+                break;
+            } else {
+                if (errno == EINTR)
+                    continue;
+                perror("recv");
+                break;
             }
         }
 
@@ -589,36 +633,11 @@ void ProcessCommand(int client_fd, const string& cmd, bool& quit, int& data_list
         close(data_client_fd);
         close(data_listen_fd);
         data_listen_fd = -1;
-        session.restart_offset = 0;
         SendResponse(client_fd, "226 Transfer complete.");
-    }
-    else if (op == "REST") {
-        if (!session.logged_in) {
-            SendResponse(client_fd, "530 Please login with USER and PASS.");
-            return;
-        }
-        if (arg.empty()) {
-            SendResponse(client_fd, "501 No offset given.");
-            return;
-        }try {
-            session.restart_offset = stoll(arg);
-            SendResponse(client_fd, "350 Restarting at " + arg + ". Send STORE or RETRIEVE.");
-        } catch (...) {
-            SendResponse(client_fd, "501 Bad offset.");
-        }
     }
     else if (op == "QUIT") {
         SendResponse(client_fd, "221 Goodbye.");
         quit = true;
-    }
-    else if (op == "FEAT") {
-        SendResponse(client_fd, "211 No features.");
-    }
-    else if (op == "SYST") {
-        SendResponse(client_fd, "215 UNIX Type: L8");
-    }
-    else if (op == "TYPE") {
-        SendResponse(client_fd, "200 Type set to " + arg + ".");
     }
     else if (op == "PWD") {
         if (!session.logged_in) {
@@ -626,34 +645,6 @@ void ProcessCommand(int client_fd, const string& cmd, bool& quit, int& data_list
             return;
         }
         SendResponse(client_fd, "257 \"" + session.current_dir + "\" is current directory.");
-    }
-    else if (op == "SIZE") {
-        if (!session.logged_in) {
-            SendResponse(client_fd, "530 Please login with USER and PASS.");
-            return;
-        }
-        struct stat st;
-        string real_path = session.getRealPath(arg.empty() ? "." : arg);
-        if (stat(real_path.c_str(), &st) == 0 && S_ISREG(st.st_mode)) {
-            SendResponse(client_fd, "213 " + to_string(st.st_size));
-        } else {
-            SendResponse(client_fd, "550 File not found.");
-        }
-    }
-    else if (op == "MDTM") {
-        if (!session.logged_in) {
-            SendResponse(client_fd, "530 Please login with USER and PASS.");
-            return;
-        }
-        struct stat st;
-        string real_path = session.getRealPath(arg.empty() ? "." : arg);
-        if (stat(real_path.c_str(), &st) == 0) {
-            char t[20];
-            strftime(t, sizeof(t), "%Y%m%d%H%M%S", gmtime(&st.st_mtime));
-            SendResponse(client_fd, "213 " + string(t));
-        } else {
-            SendResponse(client_fd, "550 File not found.");
-        }
     }
     else if (op == "CWD") {
         if (!session.logged_in) {
@@ -825,6 +816,13 @@ int CreateDataListener(int& data_port) {
         close(data_fd);
         return -1;
     }
+    SetNonBlocking(data_fd);
+    
+    struct timeval tv;
+    tv.tv_sec = 10;
+    tv.tv_usec = 0;
+
+    setsockopt(data_fd,SOL_SOCKET,SO_RCVTIMEO,&tv,sizeof(tv));
 
     socklen_t addr_len = sizeof(data_addr);
     if (getsockname(data_fd, (struct sockaddr*)&data_addr, &addr_len) == -1) {
